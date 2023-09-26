@@ -2,10 +2,6 @@ version: '3.8'
 
 services:
   pingserver:
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
     build:
       context: ./pingserver
       dockerfile: Dockerfile
@@ -27,28 +23,85 @@ services:
     ports:
       - "8999:8999"
 
-  # Prometheus
-  prometheus:
-    image: quay.io/prometheus/prometheus:v2.34.0
-    container_name: prometheus
-    command:
-      - --storage.tsdb.retention.time=1m
-      - --config.file=/etc/prometheus/prometheus-config.yml
-      - --storage.tsdb.path=/prometheus
-      - --web.enable-lifecycle
-      - --web.route-prefix=/
+  grafana:
+    image: grafana/grafana:10.0.3
+    entrypoint:
+      - /usr/share/grafana/bin/grafana-server
+      - --homepath=/usr/share/grafana
+      - --config=/etc/grafana-config/grafana.ini
     volumes:
-      - ./configs/:/etc/prometheus
+      - ./grafana/config:/etc/grafana-config
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/dashboards-provisioning:/etc/grafana/provisioning/dashboards
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
     ports:
-      - "9090:9090"
+      - "3000:3000"
 
-  wrk:
-    deploy:
-      resources:
-        reservations:
-          cpus: "4.0"
-    image: elswork/wrk
-    command: ["-t4", "-c60", "-d20s", "-t60", "--latency", "http://pingserver:8080/ping"]
+  loki:
+    image: grafana/loki:2.8.3
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+
+  mimir:
+    image: grafana/mimir:2.9.0
+    volumes:
+      - ./mimir/config:/etc/mimir-config
+    entrypoint:
+      - /bin/mimir
+      - -config.file=/etc/mimir-config/mimir.yaml
+    ports:
+      - "9009:9009"
+
+  tempo:
+    image: grafana/tempo:2.1.0
+    command:
+      - "-storage.trace.backend=local"                  # tell tempo where to permanently put traces
+      - "-storage.trace.local.path=/tmp/tempo/traces"
+      - "-storage.trace.wal.path=/tmp/tempo/wal"        # tell tempo where to store the wal
+      - "-auth.enabled=false"                           # disables the requirement for the X-Scope-OrgID header
+      - "-server.http-listen-port=3200"
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+
+  agent:
+    image: grafana/agent:latest
+    volumes:
+      - ./agent/config:/etc/agent-config
+    entrypoint:
+      - /bin/grafana-agent
+      - -server.http.address=0.0.0.0:12345
+      - -config.file=/etc/agent-config/agent.yaml
+      - -metrics.wal-directory=/tmp/agent/wal
+      - -enable-features=integrations-next
+      - -config.expand-env
+      - -config.enable-read-api
+    environment:
+      HOSTNAME: agent
+      REMOTE_WRITE_HOST: mimir:9009
+      LOKI_HOST: loki:3100
+      TEMPO_HOST: tempo:4317
+      AVALANCHE_HOST: avalanche:9001
+      MYSQL_HOST: mysql:3306
+      POSTGRES_HOST: postgres:5432
+      REDIS_HOST: redis:6379
+      DNSMASQ_HOST: dnsmasq:53
+      MEMCACHED_HOST: memcached:11211
+      CONSUL_HOST: consul:8500
+      ELASTICSEARCH_HOST: elasticsearch:9200
+      KAFKA_HOST: kafka:9093
+      MONGODB_HOST: mongodb:27017
+    ports:
+      - "12345:12345"
     depends_on:
-      pingserver:
-        condition: service_started
+      - mimir
+      - loki
+      - tempo
+
+  # prewarm script, run it again from host or another container
+#  k6:
+#    image: grafana/k6
+#    command: ["run", "/k6/k6-test.js"]
+#    volumes:
+#      - ./k6:/k6
